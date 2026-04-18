@@ -1,0 +1,35 @@
+[package]
+name = "motos-delacruz-app"
+version = "1.0.0"
+description = "Sistema de Gestión Moto Rezzio"
+authors = ["Jacobs"]
+edition = "2021"
+
+[lib]
+name = "motos_delacruz_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+bcrypt = "0.15"
+tauri = { version = "2.10.1", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# DEPENDENCIA ELIMINADA: tauri-plugin-sql (Ya usamos la arquitectura limpia con sqlx)
+
+# DEPENDENCIAS PARA EL BACKEND EMPRESARIAL
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "uuid"] }
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1.10", features = ["v4"] }
+
+# 🚀 NUEVO: PERFIL DE OPTIMIZACIÓN EXTREMA PARA PRODUCCIÓN (Release)
+[profile.release]
+panic = "abort"        # Reduce el tamaño del binario al no guardar stack traces de panics
+codegen-units = 1      # Maximiza el rendimiento (tardará más en compilar)
+lto = true             # Elimina dependencias y código muerto (Link Time Optimization)
+opt-level = 3        # Máxima velocidad de ejecución
+strip = true           # Elimina símbolos de depuración (reduce muchísimo el peso del .exe)
