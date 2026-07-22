@@ -1,8 +1,10 @@
+//src-tauri/src/db.rs
+
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode},
     SqlitePool,
 };
-use std::path::PathBuf;
+use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 use uuid::Uuid;
@@ -10,7 +12,7 @@ use uuid::Uuid;
 // Nota: Asegúrate de importar tu función de auth o la librería de hashing que uses.
 use crate::auth::hashear_password; // Función ficticia, usa la que tengas implementada
 
-pub async fn inicializar_base_datos(app_dir: &PathBuf) -> Result<SqlitePool, String> {
+pub async fn inicializar_base_datos(app_dir: &Path) -> Result<SqlitePool, String> {
     let db_path = app_dir.join("sistema_taller_v1.db");
     let db_url = format!("sqlite:{}", db_path.display());
 

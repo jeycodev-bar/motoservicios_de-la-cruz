@@ -7,11 +7,11 @@
  */
 
 import type {
-    Categoria,
-    Marca,
-    Cliente,
-    ProductoVista,
-    InventarioLote,
+    // Categoria,
+    // Marca,
+    // Cliente,
+    // ProductoVista,
+    // InventarioLote,
     EstadoVehiculo,
     TipoMovimiento
 } from './database';
@@ -138,6 +138,46 @@ export interface BodegaItemVista {
  */
 export interface PaginatedBodega {
     items: BodegaItemVista[];
+    total: number;
+}
+
+// ============================================================
+// FRAGMENTO 1 — src/types/api.ts
+// Pegar al FINAL de la sección "INVENTARIO / BODEGA"
+// (después de la interface PaginatedBodega existente)
+// ============================================================
+
+/** Refleja `VarianteBodega` en inventario.rs — un lote dentro de un producto agrupado. */
+export interface VarianteBodega {
+    lote_id: string;
+    color: string | null;
+    cantidad: number;
+    ubicacion: string;
+    ultimo_ingreso: number;
+    stock_anterior: number;
+    fecha_ultima_modificacion: string | null;
+}
+
+/** Refleja `ProductoBodega` en inventario.rs — producto con sus variantes agrupadas.
+ *  stock_critico es calculado en Rust: true si CUALQUIER variante está bajo stock_minimo.
+ *  El frontend no calcula nada — recibe la decisión ya tomada.
+ */
+export interface ProductoBodega {
+    producto_id: string;
+    producto_nombre: string;
+    sku: string;
+    es_vehiculo: number;
+    stock_total: number;
+    stock_minimo: number;
+    stock_critico: boolean;
+    categoria_nombre: string | null;
+    marca_nombre: string | null;
+    variantes: VarianteBodega[];
+}
+
+/** Refleja `PaginatedProductosBodega` en inventario.rs. */
+export interface PaginatedProductosBodega {
+    items: ProductoBodega[];
     total: number;
 }
 

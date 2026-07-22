@@ -1,5 +1,7 @@
+//src-tauri/src/ventas.rs
+
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Sqlite, SqlitePool};
+use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use tauri::State;
 use uuid::Uuid;
 
@@ -77,7 +79,59 @@ pub struct RespuestaPaginadaVentas {
 }
 
 // ==========================================
-// 2. COMANDOS DE LECTURA (Catálogo)
+// PATRÓN FILTROS PARA VENTAS (ZERO-ALLOCATION)
+// ==========================================
+
+struct HistorialVentasFiltros<'a> {
+    filtros: &'a FiltrosVentas,
+}
+
+impl<'a> HistorialVentasFiltros<'a> {
+    fn new(filtros: &'a FiltrosVentas) -> Self {
+        Self { filtros }
+    }
+
+    fn aplicar(&self, builder: &mut QueryBuilder<'a, Sqlite>) {
+        if let Some(inicio) = &self.filtros.fecha_inicio {
+            let inicio_trim = inicio.trim();
+            if !inicio_trim.is_empty() {
+                // Delegamos a SQLite la gestión de la hora (si la necesitas) o lo dejamos limpio
+                builder.push(" AND v.fecha >= (");
+                builder.push_bind(inicio_trim);
+                builder.push(" || ' 00:00:00')");
+            }
+        }
+
+        if let Some(fin) = &self.filtros.fecha_fin {
+            let fin_trim = fin.trim();
+            if !fin_trim.is_empty() {
+                builder.push(" AND v.fecha <= (");
+                builder.push_bind(fin_trim);
+                builder.push(" || ' 23:59:59')");
+            }
+        }
+
+        if let Some(cliente) = &self.filtros.busqueda_cliente {
+            let cliente_trim = cliente.trim();
+            if !cliente_trim.is_empty() {
+                // Búsqueda LIKE concatenada a nivel SQLite (Zero Rust Allocations)
+                builder.push(" AND (LOWER(v.cliente_nombre) LIKE '%' || LOWER(");
+                builder.push_bind(cliente_trim);
+                builder.push(") || '%' OR LOWER(c.numero_documento) LIKE '%' || LOWER(");
+                builder.push_bind(cliente_trim);
+                builder.push(") || '%') ");
+            }
+        }
+
+        if let Some(vendedor_id) = self.filtros.usuario_id {
+            builder.push(" AND v.usuario_id = ");
+            builder.push_bind(vendedor_id);
+        }
+    }
+}
+
+// ==========================================
+// COMANDOS DE LECTURA OPTIMIZADOS
 // ==========================================
 
 #[tauri::command]
@@ -89,24 +143,16 @@ pub async fn obtener_catalogo_optimizado(
     offset: i32,
     db: State<'_, SqlitePool>,
 ) -> Result<Vec<ProductoCatalogo>, String> {
-    // ✅ REFACTORIZADO: QueryBuilder con push_bind() — elimina SQL Injection
-    // Misma estrategia que catalogo.rs para consistencia en toda la codebase
     let mut query: sqlx::QueryBuilder<'_, Sqlite> = sqlx::QueryBuilder::new(
         r#"
         SELECT 
-            p.id as producto_id, 
-            p.nombre as producto_nombre, 
-            p.sku, 
-            p.es_vehiculo, 
-            p.precio_venta_referencial,
-            m.nombre as marca_nombre,
-            c.nombre as categoria_nombre,
+            p.id as producto_id, p.nombre as producto_nombre, p.sku, 
+            p.es_vehiculo, p.precio_venta_referencial,
+            m.nombre as marca_nombre, c.nombre as categoria_nombre,
             SUM(il.cantidad) as cantidad_total,
             json_group_array(
                 json_object(
-                    'lote_id', il.id,
-                    'color', il.color,
-                    'cantidad', il.cantidad
+                    'lote_id', il.id, 'color', il.color, 'cantidad', il.cantidad
                 )
             ) as variantes
         FROM productos p
@@ -117,51 +163,46 @@ pub async fn obtener_catalogo_optimizado(
         "#,
     );
 
-    // ✅ Filtro categoria_id — antes: format!() vulnerable, ahora: push_bind() seguro
-    let cat_limpia = categoria_id.trim().to_uppercase();
-    if !cat_limpia.is_empty()
-        && cat_limpia != "TODOS"
-        && cat_limpia != "TODAS"
-        && cat_limpia != "ALL"
+    // 🚀 MEJORA: eq_ignore_ascii_case no asigna memoria (Adiós to_uppercase)
+    let cat_trim = categoria_id.trim();
+    if !cat_trim.is_empty()
+        && !cat_trim.eq_ignore_ascii_case("todos")
+        && !cat_trim.eq_ignore_ascii_case("all")
     {
         query.push(" AND p.categoria_id = ");
-        query.push_bind(categoria_id);
+        query.push_bind(cat_trim);
     }
 
-    // ✅ Filtro marca_id — antes: format!() vulnerable, ahora: push_bind() seguro
-    let marca_limpia = marca_id.trim().to_uppercase();
-    if !marca_limpia.is_empty()
-        && marca_limpia != "TODOS"
-        && marca_limpia != "TODAS"
-        && marca_limpia != "ALL"
+    let marca_trim = marca_id.trim();
+    if !marca_trim.is_empty()
+        && !marca_trim.eq_ignore_ascii_case("todos")
+        && !marca_trim.eq_ignore_ascii_case("all")
     {
         query.push(" AND p.marca_id = ");
-        query.push_bind(marca_id);
+        query.push_bind(marca_trim);
     }
 
-    // ✅ Filtro búsqueda — antes: format!() vulnerable, ahora: push_bind() seguro
-    let termino = busqueda.trim().to_string();
+    // 🚀 MEJORA: Búsqueda LIKE concatenada en SQL (Adiós format!)
+    let termino = busqueda.trim();
     if !termino.is_empty() {
-        let like_pattern = format!("{}%", termino);
-        query.push(" AND (p.nombre LIKE ");
-        query.push_bind(like_pattern.clone());
-        query.push(" OR p.sku LIKE ");
-        query.push_bind(like_pattern);
-        query.push(")");
+        // En tu código original hacías `{}%` (Empieza por). Aquí lo respeto en SQL:
+        query.push(" AND (LOWER(p.nombre) LIKE LOWER(");
+        query.push_bind(termino);
+        query.push(") || '%' OR LOWER(p.sku) LIKE LOWER(");
+        query.push_bind(termino);
+        query.push(") || '%')");
     }
 
-    // ✅ GROUP BY, ORDER BY, LIMIT y OFFSET — LIMIT/OFFSET también van con push_bind()
     query.push(" GROUP BY p.id ORDER BY p.nombre ASC LIMIT ");
     query.push_bind(limit);
     query.push(" OFFSET ");
     query.push_bind(offset);
 
-    // Ejecución
     let rows = query
         .build_query_as::<ProductoCatalogo>()
         .fetch_all(&*db)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Error en catálogo: {}", e))?;
 
     Ok(rows)
 }
@@ -169,88 +210,51 @@ pub async fn obtener_catalogo_optimizado(
 #[tauri::command]
 pub async fn obtener_historial_ventas_paginado(
     filtros: FiltrosVentas,
-    pool: tauri::State<'_, SqlitePool>,
+    pool: State<'_, SqlitePool>,
 ) -> Result<RespuestaPaginadaVentas, String> {
-    let mut count_builder: sqlx::QueryBuilder<'_, Sqlite> = sqlx::QueryBuilder::new(
-        "SELECT COUNT(v.id) FROM ventas v 
-         LEFT JOIN usuarios u ON v.usuario_id = u.id 
-         LEFT JOIN clientes c ON v.cliente_id = c.id 
-         WHERE 1=1",
-    );
+    // 🚀 MEJORA: Transacción de Lectura Atómica (Previene la paginación fantasma)
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    let mut query_builder: sqlx::QueryBuilder<'_, Sqlite> = sqlx::QueryBuilder::new(
-        "SELECT v.id, v.cliente_nombre, v.total, v.fecha, u.nombre_completo as vendedor_nombre 
+    let base_joins = "
          FROM ventas v 
          LEFT JOIN usuarios u ON v.usuario_id = u.id 
          LEFT JOIN clientes c ON v.cliente_id = c.id 
-         WHERE 1=1",
-    );
+         WHERE 1=1
+    ";
 
-    // Filtro: Rango de Fechas
-    if let (Some(inicio), Some(fin)) = (&filtros.fecha_inicio, &filtros.fecha_fin) {
-        let fecha_inicio_db = format!("{} 00:00:00", inicio);
-        let fecha_fin_db = format!("{} 23:59:59", fin);
+    let filtro_manager = HistorialVentasFiltros::new(&filtros);
 
-        count_builder.push(" AND v.fecha >= ");
-        count_builder.push_bind(fecha_inicio_db.clone());
-        count_builder.push(" AND v.fecha <= ");
-        count_builder.push_bind(fecha_fin_db.clone());
+    // 1. COUNT Paginación
+    let mut count_builder: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT COUNT(v.id) ");
+    count_builder.push(base_joins);
+    filtro_manager.aplicar(&mut count_builder); // Aplicamos lógica limpia
 
-        query_builder.push(" AND v.fecha >= ");
-        query_builder.push_bind(fecha_inicio_db);
-        query_builder.push(" AND v.fecha <= ");
-        query_builder.push_bind(fecha_fin_db);
-    }
-
-    // Filtro: Búsqueda por nombre de cliente O por DNI
-    if let Some(cliente) = &filtros.busqueda_cliente {
-        if !cliente.trim().is_empty() {
-            let like_pattern = format!("%{}%", cliente);
-
-            count_builder.push(" AND (v.cliente_nombre LIKE ");
-            count_builder.push_bind(like_pattern.clone());
-            count_builder.push(" OR c.numero_documento LIKE ");
-            count_builder.push_bind(like_pattern.clone());
-            count_builder.push(") ");
-
-            query_builder.push(" AND (v.cliente_nombre LIKE ");
-            query_builder.push_bind(like_pattern.clone());
-            query_builder.push(" OR c.numero_documento LIKE ");
-            query_builder.push_bind(like_pattern);
-            query_builder.push(") ");
-        }
-    }
-
-    // Filtro: Vendedor Específico
-    if let Some(vendedor_id) = filtros.usuario_id {
-        count_builder.push(" AND v.usuario_id = ");
-        count_builder.push_bind(vendedor_id);
-
-        query_builder.push(" AND v.usuario_id = ");
-        query_builder.push_bind(vendedor_id);
-    }
-
-    // 1. Ejecutar el COUNT total primero
     let total_registros: i64 = count_builder
         .build_query_scalar::<i64>()
-        .fetch_one(&*pool)
+        .fetch_one(&mut *tx) // Usamos la transacción tx
         .await
-        .map_err(|e| format!("Error al contar registros: {}", e))?;
+        .map_err(|e| format!("Error al contar ventas: {}", e))?;
 
-    // 2. Completar la consulta principal con Ordenamiento y Paginación
+    // 2. SELECT Datos
+    let mut query_builder: QueryBuilder<Sqlite> = QueryBuilder::new(
+        "SELECT v.id, v.cliente_nombre, v.total, v.fecha, u.nombre_completo as vendedor_nombre ",
+    );
+    query_builder.push(base_joins);
+    filtro_manager.aplicar(&mut query_builder); // Reutilizamos lógica
+
     query_builder.push(" ORDER BY v.fecha DESC LIMIT ");
     query_builder.push_bind(filtros.limite as i64);
     query_builder.push(" OFFSET ");
     query_builder.push_bind(filtros.offset as i64);
 
-    // 3. Ejecutar la consulta final de datos
     let items = query_builder
         .build_query_as::<VentaHistorialDTO>()
-        .fetch_all(&*pool)
+        .fetch_all(&mut *tx) // Usamos la transacción tx
         .await
         .map_err(|e| format!("Error al obtener ventas: {}", e))?;
 
-    // 4. Retornar los datos limpios a React
+    tx.commit().await.map_err(|e| e.to_string())?;
+
     Ok(RespuestaPaginadaVentas {
         items,
         total_registros,

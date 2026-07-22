@@ -1,12 +1,13 @@
-// src/services/inventario.ts
+// src/services/inventario_service.ts
 /**
  * services/inventario.ts
  *
- * CAMBIOS RESPECTO A LA VERSIÓN ANTERIOR:
+ * CAMBIOS APLICADOS:
  * - BodegaItemVista y PaginatedBodega eliminados (ahora en types/api.ts)
  * - PaginacionResult → PaginatedResponse (refleja el struct real de Rust)
  * - catch(error: any) → catch(e: unknown) + normalizeError()
  * - Validaciones previas al invoke agrupadas en helper privado
+ * - ✅ recargarStockExistente ahora acepta tipoMovimiento (FRAGMENTO 4 aplicado)
  */
 
 import { invoke } from '@tauri-apps/api/core';
@@ -15,6 +16,8 @@ import type {
     InventarioRecienteVista,
     PaginatedResponse,
     PaginatedBodega,
+    PaginatedProductosBodega,
+    TipoMovimiento
 } from '../types';
 
 // ==========================================
@@ -33,7 +36,6 @@ function validarRegistroIngreso(productoId: string, cantidad: number, usuarioId:
 
 export const InventarioService = {
 
-    // ✅ PaginatedBodega viene de api.ts — no se redefine aquí
     obtenerStock: async (
         buscar: string = '',
         categoriaId: string = '',
@@ -54,8 +56,26 @@ export const InventarioService = {
         }
     },
 
-    // ✅ Rust devuelve PaginatedResponse<T> — { data, total_registros, pagina_actual, total_paginas }
-    //    Antes usaba PaginacionResult<T> — { data, total, pagina_actual, limite } — incorrecto
+    obtenerStockAgrupado: async (
+        buscar: string = '',
+        categoriaId: string = '',
+        marcaId: string = '',
+        pagina: number = 1,
+        limite: number = 15
+    ): Promise<PaginatedProductosBodega> => {
+        try {
+            return await invoke<PaginatedProductosBodega>('obtener_stock_bodega_agrupado', {
+                buscar: buscar || null,
+                categoriaId: categoriaId || null,
+                marcaId: marcaId || null,
+                pagina,
+                limite,
+            });
+        } catch (e: unknown) {
+            throw new Error(normalizeError(e, 'Error al obtener stock agrupado'));
+        }
+    },
+
     obtenerInventarioReciente: async (
         pagina: number = 1,
         limite: number = 5
@@ -93,11 +113,13 @@ export const InventarioService = {
         }
     },
 
+    // FRAGMENTO 4 APLICADO: 'tipoMovimiento' añadido con valor por defecto
     recargarStockExistente: async (
         loteId: string,
         cantidad: number,
         usuarioId: string,
-        motivo: string = 'RECARGA DESDE BODEGA'
+        motivo: string = 'RECARGA DESDE BODEGA',
+        tipoMovimiento: TipoMovimiento = 'ENTRADA'
     ): Promise<void> => {
         if (!loteId) throw new Error('Identificador de lote requerido.');
         if (cantidad <= 0) throw new Error('La cantidad debe ser mayor a cero.');
@@ -108,6 +130,7 @@ export const InventarioService = {
                 cantidad,
                 usuarioId,
                 motivo,
+                tipoMovimiento, // Pasamos el parámetro a Rust
             });
         } catch (e: unknown) {
             throw new Error(normalizeError(e, 'Error interno al recargar stock.'));

@@ -1,3 +1,5 @@
+//src-tauri/src/clientes.rs
+
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use uuid::Uuid;

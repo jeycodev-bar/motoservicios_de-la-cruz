@@ -23,8 +23,8 @@ const MAPA_COLORES: Readonly<Record<string, string>> = Object.freeze({
 
     // Cálidos
     ROJO: '#DC2626',
-    NARANJA: '#EA580C',
-    AMARILLO: '#CA8A04',
+    NARANJA: '#fd6e20',
+    AMARILLO: '#fae26b',
     DORADO: '#D97706',
 
     // Fríos

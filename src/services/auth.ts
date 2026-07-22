@@ -1,5 +1,4 @@
 // src/services/auth.ts
-// import { getDb } from './db';
 import { Usuario, RolUsuario } from '../types/database';
 import { invoke } from '@tauri-apps/api/core';
 
@@ -68,15 +67,6 @@ export const AuthService = {
         };
     },
 
-    // 📋 Lectura pura (Nota de Arquitectura: Considerar migrar a Rust en el futuro para unificar el DAL)
-    // obtenerUsuarios: async (): Promise<Usuario[]> => {
-    //     const db = await getDb();
-    //     return await db.select<Usuario[]>(
-    //         `SELECT id, dni, nombre_completo, username, rol, estado
-    //          FROM usuarios
-    //          ORDER BY fecha_creacion DESC`
-    //     );
-    // },
     // ✅ Totalmente migrado a Rust. Adiós acceso directo.
     obtenerUsuarios: async (): Promise<Usuario[]> => {
         try {

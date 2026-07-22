@@ -13,7 +13,7 @@ import type { DetalleTicket } from '../utils/pdfGenerator';
 import { VentasService } from '../services/ventas_service';
 import { generarTicketVentaPDF } from '../utils/pdfGenerator';
 import ModalVisorPDF from '../modales/ModalVisorPDF';
-import { formatearFechaLocal } from '../utils/fechas';
+import { formatearFechaLocal, obtenerLimitesUTCDelDia } from '../utils/fechas';
 import { useDebounce } from '../hooks/useDebounce';
 import { normalizeError } from '../utils/errors';
 
@@ -49,8 +49,9 @@ export default function HistorialVentas() {
         setErrorVista(null);
         try {
             const data = await VentasService.obtenerHistorialVentas({
-                fecha_inicio: fechaInicio || undefined,
-                fecha_fin: fechaFin || undefined,
+                // 👇 APLICAMOS EL FILTRO (Convierte a UTC puro antes de enviar a Rust)
+                fecha_inicio: obtenerLimitesUTCDelDia(fechaInicio, 'INICIO'),
+                fecha_fin: obtenerLimitesUTCDelDia(fechaFin, 'FIN'),
                 busqueda_cliente: debouncedBusqueda || undefined,
                 usuario_id: undefined,
                 limite: LIMITE,
@@ -98,7 +99,8 @@ export default function HistorialVentas() {
             const detallesPDF = await VentasService.obtenerDetalleVenta(venta.id);
             const url = generarTicketVentaPDF(venta, detallesPDF as DetalleTicket[], accion);
             if (accion === 'DESCARGAR') {
-                toast.success('Comprobante descargado correctamente');
+                // toast.success('Comprobante descargado correctamente');
+                toast.success(`Comprobante de ${venta.cliente_nombre} descargado correctamente`);
             } else if (accion === 'VER' && url) {
                 setPdfGeneradoUrl(url);
             }
@@ -117,12 +119,12 @@ export default function HistorialVentas() {
     const totalPaginas = Math.ceil(totalRegistros / LIMITE);
 
     return (
-        <div className="p-6 max-w-7xl mx-auto flex flex-col h-[calc(100vh-80px)]">
+        <div className="p-2 max-w-7xl mx-auto flex flex-col h-[calc(100vh-80px)]">
 
             {/* Encabezado */}
             <div className="flex justify-between items-center mb-6 shrink-0">
                 <div>
-                    <h1 className="text-3xl font-bold text-slate-800 flex items-center gap-3">
+                    <h1 className="text-3xl font-black text-slate-800 flex items-center gap-3">
                         <div className="bg-emerald-100 p-2 rounded-lg">
                             <Receipt className="text-emerald-600" size={28} strokeWidth={2.5} />
                         </div>

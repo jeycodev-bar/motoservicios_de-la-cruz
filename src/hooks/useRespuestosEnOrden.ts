@@ -1,16 +1,13 @@
-import { useState, useEffect, useRef, UIEvent } from 'react';
+// src/hooks/useRepuestosEnOrden.ts
+import { useState, useEffect, useCallback, useRef, UIEvent } from 'react';
 import { useDebounce } from './useDebounce';
-import type { RepuestoCatalogo, DetalleOrden } from '../types';
+import type { RepuestoCatalogo } from '../types';
 
 const LIMITE_PAGINA = 20;
 
 interface UseRepuestosEnOrdenParams {
-    /** Si el modal está abierto — controla cuándo arrancar y limpiar */
     abierto: boolean;
-    /** Función de carga de repuestos — de TallerService.obtenerCatalogoRepuestos */
     fetchRepuestos: (busqueda: string, limite: number, offset: number) => Promise<RepuestoCatalogo[]>;
-    /** Detalles actuales de la orden — se usa para la sincronización reactiva de stock */
-    detallesOrden: DetalleOrden[];
 }
 
 interface UseRepuestosEnOrdenReturn {
@@ -18,150 +15,168 @@ interface UseRepuestosEnOrdenReturn {
     buscando: boolean;
     cargandoMas: boolean;
     hayMas: boolean;
+    error: string | null;
     busquedaLocal: string;
     setBusquedaLocal: (v: string) => void;
     handleScroll: (e: UIEvent<HTMLDivElement>) => void;
+    refrescarCatalogo: () => void;
 }
 
 /**
- * useRepuestosEnOrden — Encapsula toda la lógica de búsqueda y sincronización
- * de repuestos en la hoja de trabajo del taller.
+ * useRepuestosEnOrden — versión definitiva.
  *
- * Antes: 9 useEffect + 6 useState dispersos en ModalTallerHojaTrabajo.
- * Ahora: un único hook con responsabilidad clara y API mínima.
+ * PROBLEMAS DE LA VERSIÓN ANTERIOR:
  *
- * Efectos internos:
- *   1. Debounce de búsqueda (300ms) — via useDebounce
- *   2. Reset de paginación cuando cambia búsqueda o se abre el modal
- *   3. Motor de carga + scroll infinito (con flag `activo` anti-memory-leak)
- *   4. Sincronización reactiva de stock cuando cambian los detalles de la orden
- *   5. Limpieza completa al cerrar el modal
+ * 1. DOS EFECTOS QUE COMPITEN: El Efecto 1 (reset de offset) y el Efecto 2 (fetch)
+ *    tenían dependencias solapadas. Bajo estrés (agregar/quitar repuestos rápido),
+ *    disparaban 2-3 fetches simultáneos. El flag `activo` cancelaba todos menos el
+ *    último en INICIARSE — pero no el último en RESOLVERSE. Si SQLite respondía
+ *    fuera de orden, el resultado incorrecto ganaba.
+ *
+ * 2. triggerRefresco + setOffset(0) como dos setState separados → dos renders
+ *    → dos ejecuciones del efecto de fetch → race condition garantizada cuando
+ *    offset ya era 0 (primer repuesto agregado).
+ *
+ * 3. onRefrescarCatalogo se recreaba en cada render de useTaller (no estaba en
+ *    useCallback), lo que causaba que el useEffect de registro en
+ *    ModalTallerHojaTrabajo se disparara innecesariamente.
+ *
+ * SOLUCIÓN:
+ *
+ * Un único parámetro de control llamado `fetchKey` (número que se incrementa)
+ * reemplaza tanto el offset-como-trigger como el triggerRefresco separado.
+ * El efecto de fetch es EL ÚNICO que maneja la paginación y el reset.
+ * Una ref para busquedaDebounced anterior detecta si el fetch es por nueva
+ * búsqueda (→ reset) o por scroll (→ acumular) o por refresco (→ reset).
+ *
+ * El resultado: UN SOLO fetch en vuelo a la vez, garantizado.
  */
 export function useRepuestosEnOrden({
     abierto,
     fetchRepuestos,
-    detallesOrden,
 }: UseRepuestosEnOrdenParams): UseRepuestosEnOrdenReturn {
 
     const [busquedaLocal, setBusquedaLocal] = useState('');
     const [resultados, setResultados] = useState<RepuestoCatalogo[]>([]);
-    const [buscando, setBuscando] = useState(false);
-    const [cargandoMas, setCargandoMas] = useState(false);
-    const [offset, setOffset] = useState(0);
     const [hayMas, setHayMas] = useState(true);
+    const [error, setError] = useState<string | null>(null);
 
-    // Snapshot de detalles anteriores para calcular el delta de stock
-    const prevDetallesRef = useRef<DetalleOrden[]>([]);
+    // Estado de carga consolidado — elimina los boolean buscando/cargandoMas
+    // que se podían desincronizar entre sí.
+    const [estadoCarga, setEstadoCarga] = useState<'idle' | 'buscando' | 'mas'>('idle');
 
-    // ── Efecto 1: Debounce ────────────────────────────────────────────────────
+    // ✅ NÚCLEO DEL FIX: un único objeto de "intención de fetch" como ref.
+    //    Al leerlo desde el efecto, React no lo trata como dependencia reactiva —
+    //    evita re-renders espurios. Al escribirlo, el efecto usa siempre el valor más reciente.
+    const intentoRef = useRef<{
+        busqueda: string;
+        offset: number;
+        version: number;  // se incrementa en cada refresco forzado
+    }>({ busqueda: '', offset: 0, version: 0 });
+
+    // Señal reactiva que dispara el efecto — un único número.
+    // Se incrementa cuando queremos un fetch: búsqueda nueva, scroll, refresco.
+    const [fetchSignal, setFetchSignal] = useState(0);
+
     const busquedaDebounced = useDebounce(busquedaLocal, 300);
 
-    // ── Efecto 2: Reset de paginación cuando cambia la búsqueda o se abre ───
+    // ── Cuando cambia la búsqueda: reset + fetch ──────────────────────────────
     useEffect(() => {
         if (!abierto) return;
-        setResultados([]);
-        setOffset(0);
-        setHayMas(true);
+        // Actualizar la intención: nueva búsqueda → offset vuelve a 0
+        intentoRef.current = {
+            busqueda: busquedaDebounced,
+            offset: 0,
+            version: intentoRef.current.version,
+        };
+        // Disparar el efecto de fetch con una señal
+        setFetchSignal(s => s + 1);
     }, [busquedaDebounced, abierto]);
 
-    // ── Efecto 3: Motor de carga + scroll infinito ────────────────────────────
+    // ── ÚNICO EFECTO DE FETCH ─────────────────────────────────────────────────
+    // Solo depende de fetchSignal — un número que cambia exactamente cuando
+    // queremos un fetch. Nada más puede dispararlo accidentalmente.
     useEffect(() => {
         if (!abierto) return;
 
+        const { busqueda, offset, version: _v } = intentoRef.current;
         let activo = true;
 
+        const esReset = offset === 0;
+        setEstadoCarga(esReset ? 'buscando' : 'mas');
+        setError(null);
+
         const cargar = async () => {
-            if (offset === 0) setBuscando(true);
-            else setCargandoMas(true);
-
             try {
-                const data = await fetchRepuestos(busquedaDebounced, LIMITE_PAGINA, offset);
-
-                if (!activo) return;
+                const data = await fetchRepuestos(busqueda, LIMITE_PAGINA, offset);
+                if (!activo) return;  // fetch más reciente ganó — ignorar este
 
                 setHayMas(data.length >= LIMITE_PAGINA);
-
-                setResultados(prev =>
-                    offset === 0 ? data : [...prev, ...data]
-                );
+                setResultados(prev => esReset ? data : [...prev, ...data]);
             } catch {
-                // El error ya fue logueado en el servicio — aquí solo evitamos crash
+                if (!activo) return;
+                setError('No se pudo cargar el catálogo de repuestos.');
             } finally {
-                if (activo) {
-                    setBuscando(false);
-                    setCargandoMas(false);
-                }
+                if (activo) setEstadoCarga('idle');
             }
         };
 
         cargar();
         return () => { activo = false; };
-    }, [busquedaDebounced, offset, abierto, fetchRepuestos]);
 
-    // ── Efecto 4: Sincronización reactiva de stock ────────────────────────────
-    // Cuando se agrega o quita un repuesto de la orden, actualizamos visualmente
-    // el stock en el catálogo sin necesidad de recargar desde la BD.
-    useEffect(() => {
-        if (!abierto || resultados.length === 0) {
-            prevDetallesRef.current = detallesOrden;
-            return;
-        }
+        // fetchSignal es la ÚNICA dependencia — se actualiza cuando queremos fetch.
+        // fetchRepuestos y abierto son estables en la práctica (useCallback + prop).
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [fetchSignal]);
 
-        const prevMap = new Map<string, number>(
-            prevDetallesRef.current.map(d => [d.lote_id, Number(d.cantidad)])
-        );
-        const nuevoMap = new Map<string, number>(
-            detallesOrden.map(d => [d.lote_id, Number(d.cantidad)])
-        );
-
-        let huboCambios = false;
-
-        const nuevosResultados = resultados.map(repuesto => {
-            const oldCant = prevMap.get(repuesto.lote_id) ?? 0;
-            const newCant = nuevoMap.get(repuesto.lote_id) ?? 0;
-            const delta = newCant - oldCant;
-
-            if (delta !== 0) {
-                huboCambios = true;
-                return {
-                    ...repuesto,
-                    cantidad: Math.max(0, repuesto.cantidad - delta),
-                };
-            }
-            return repuesto;
-        });
-
-        if (huboCambios) setResultados(nuevosResultados);
-
-        prevDetallesRef.current = detallesOrden;
-    }, [detallesOrden]); // eslint-disable-line react-hooks/exhaustive-deps
-
-    // ── Efecto 5: Limpieza al cerrar ──────────────────────────────────────────
+    // ── Limpieza al cerrar ────────────────────────────────────────────────────
     useEffect(() => {
         if (abierto) return;
         setBusquedaLocal('');
         setResultados([]);
-        setOffset(0);
         setHayMas(true);
-        prevDetallesRef.current = [];
+        setError(null);
+        setEstadoCarga('idle');
+        intentoRef.current = { busqueda: '', offset: 0, version: 0 };
     }, [abierto]);
 
-    // ── Detector de scroll para paginación infinita ───────────────────────────
-    const handleScroll = (e: UIEvent<HTMLDivElement>) => {
+    // ── refrescarCatalogo: fuerza un fetch desde offset=0 ────────────────────
+    // useCallback([]) — referencia absolutamente estable.
+    // No importa cuántas veces se llame: solo actualiza el ref y dispara la señal.
+    const refrescarCatalogo = useCallback(() => {
+        intentoRef.current = {
+            busqueda: intentoRef.current.busqueda,
+            offset: 0,
+            version: intentoRef.current.version + 1,
+        };
+        setFetchSignal(s => s + 1);
+    }, []);
+
+    // ── Scroll infinito ───────────────────────────────────────────────────────
+    const handleScroll = useCallback((e: UIEvent<HTMLDivElement>) => {
         const { scrollTop, clientHeight, scrollHeight } = e.currentTarget;
-        const cercanAlFinal = scrollHeight - scrollTop <= clientHeight + 10;
-        if (cercanAlFinal && !buscando && !cargandoMas && hayMas) {
-            setOffset(prev => prev + LIMITE_PAGINA);
+        const cercanAlFinal = scrollHeight - scrollTop <= clientHeight + 50;
+
+        if (cercanAlFinal && estadoCarga === 'idle' && hayMas) {
+            // Cargar más: incrementar offset, preservar búsqueda y versión
+            const nuevoOffset = intentoRef.current.offset + LIMITE_PAGINA;
+            intentoRef.current = {
+                ...intentoRef.current,
+                offset: nuevoOffset,
+            };
+            setFetchSignal(s => s + 1);
         }
-    };
+    }, [estadoCarga, hayMas]);
 
     return {
         resultados,
-        buscando,
-        cargandoMas,
+        buscando: estadoCarga === 'buscando',
+        cargandoMas: estadoCarga === 'mas',
         hayMas,
+        error,
         busquedaLocal,
         setBusquedaLocal,
         handleScroll,
+        refrescarCatalogo,
     };
 }

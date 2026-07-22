@@ -1,4 +1,4 @@
-// /src/components/ModalTallerConfirmarEntrega.tsx
+// src/components/ModalTallerConfirmarEntrega.tsx
 import { AlertTriangle, CheckCircle, X, Receipt, Wrench } from 'lucide-react';
 import type { OrdenActiva, DetalleOrden } from '../types';
 

@@ -78,29 +78,6 @@ export const TallerService = {
         }
     },
 
-    // Catálogo de repuestos — lectura directa a DB (sin Rust, sin mutaciones)
-    // obtenerCatalogoRepuestos: async (
-    //     busqueda: string = '',
-    //     limite: number = 8,
-    //     offset: number = 0
-    // ): Promise<RepuestoCatalogo[]> => {
-    //     const db = await getDb();
-    //     const searchTerm = `%${busqueda.trim()}%`;
-    //     return await db.select<RepuestoCatalogo[]>(`
-    //         SELECT
-    //             il.id as lote_id,
-    //             p.nombre as producto_nombre,
-    //             il.cantidad,
-    //             p.precio_venta_referencial
-    //         FROM inventario_lotes il
-    //         JOIN productos p ON il.producto_id = p.id
-    //         WHERE p.es_vehiculo = 0
-    //           AND il.cantidad > 0
-    //           AND p.nombre LIKE ?
-    //         ORDER BY p.nombre ASC
-    //         LIMIT ? OFFSET ?
-    //     `, [searchTerm, limite, offset]);
-    // },
     // ✅ Delegado a Rust
     obtenerCatalogoRepuestos: async (
         busqueda: string = '',
@@ -114,18 +91,6 @@ export const TallerService = {
         }
     },
 
-    // obtenerDetallesOrden: async (ordenId: string): Promise<DetalleOrden[]> => {
-    //     const db = await getDb();
-    //     return await db.select<DetalleOrden[]>(`
-    //         SELECT
-    //             td.*,
-    //             p.nombre as producto_nombre
-    //         FROM taller_detalles td
-    //         JOIN inventario_lotes il ON td.lote_id = il.id
-    //         JOIN productos p ON il.producto_id = p.id
-    //         WHERE td.orden_id = ?
-    //     `, [ordenId]);
-    // },
     // ✅ Delegado a Rust
     obtenerDetallesOrden: async (ordenId: string): Promise<DetalleOrden[]> => {
         try {
@@ -183,48 +148,6 @@ export const TallerService = {
         }
     },
 
-    // Historial paginado — lectura directa a DB (órdenes ARCHIVADAS)
-    // obtenerHistorialPaginado: async (
-    //     filtros: FiltrosHistorialTaller
-    // ): Promise<RespuestaHistorialTaller> => {
-    //     const db = await getDb();
-    //     const { busqueda, limite, offset } = filtros;
-
-    //     // ✅ (string | number)[] en lugar de any[] — suficiente para los valores SQL
-    //     const queryParams: (string | number)[] = [];
-    //     let whereClause = "WHERE t.estado = 'ARCHIVADO'";
-
-    //     if (busqueda?.trim()) {
-    //         whereClause += ` AND (c.nombre_completo LIKE ? OR t.vehiculo_info LIKE ? OR t.id LIKE ?)`;
-    //         const like = `%${busqueda.trim()}%`;
-    //         queryParams.push(like, like, like);
-    //     }
-
-    //     const countResult = await db.select<{ total: number }[]>(`
-    //         SELECT COUNT(*) as total
-    //         FROM taller_ordenes t
-    //         JOIN clientes c ON t.cliente_id = c.id
-    //         ${whereClause}
-    //     `, queryParams);
-
-    //     const total_registros = countResult[0]?.total ?? 0;
-
-    //     const items = await db.select<OrdenActiva[]>(`
-    //         SELECT
-    //             t.*,
-    //             c.nombre_completo as cliente_nombre,
-    //             c.telefono       as cliente_telefono,
-    //             u.nombre_completo as mecanico_nombre
-    //         FROM taller_ordenes t
-    //         JOIN clientes c ON t.cliente_id = c.id
-    //         LEFT JOIN usuarios u ON t.creado_por = u.id
-    //         ${whereClause}
-    //         ORDER BY t.fecha_ingreso DESC
-    //         LIMIT ? OFFSET ?
-    //     `, [...queryParams, limite, offset]);
-
-    //     return { items, total_registros };
-    // },
     // ✅ Delegado a Rust (Historial Paginado)
     obtenerHistorialPaginado: async (
         filtros: FiltrosHistorialTaller

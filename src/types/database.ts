@@ -159,4 +159,4 @@ export interface AuditoriaLog {
 
 // Corregido: Rust usa 'ENTRADA' y 'SALIDA' — no 'INGRESO'
 // Verificar en kardex.rs: tipo_movimiento = 'ENTRADA' | 'SALIDA'
-export type TipoMovimiento = 'ENTRADA' | 'SALIDA';
+export type TipoMovimiento = 'ENTRADA' | 'SALIDA' | 'DEVOLUCION_TALLER';

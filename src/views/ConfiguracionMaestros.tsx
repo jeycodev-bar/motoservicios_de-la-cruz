@@ -114,10 +114,10 @@ export default function ConfiguracionMaestros() {
     };
 
     return (
-        <div className="min-h-screen bg-slate-50/50 p-6 md:p-8 font-sans relative">
+        <div className="min-h-screen bg-slate-50/50 p-2 md:p-2 font-sans relative">
             {/* El banner de notificación casero fue eliminado — sonner lo reemplaza */}
 
-            <div className="max-w-7xl mx-auto space-y-8">
+            <div className="max-w-7xl mx-auto space-y-4">
 
                 {/* Header */}
                 <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">

@@ -1,3 +1,4 @@
+//src-tauri/src/auth.rs
 use bcrypt::{hash, verify, DEFAULT_COST};
 use serde::Serialize;
 use serde_json::json;

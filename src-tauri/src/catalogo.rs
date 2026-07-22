@@ -1,5 +1,8 @@
-use serde_json::{json, Value};
-use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
+//src-tauri/src/catalogo.rs
+
+use serde::Serialize;
+use serde_json::Value;
+use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use uuid::Uuid;
 
 // ==========================================
@@ -28,6 +31,33 @@ struct ProductoSnapshot {
     modelo: Option<String>,
 }
 
+// 1. DTO EXCLUSIVO PARA LA RESPUESTA (Adiós al mapeo manual)
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ProductoVistaDTO {
+    pub id: String,
+    pub categoria_id: Option<String>,
+    pub marca_id: Option<String>,
+    pub nombre: String,
+    pub sku: String,
+    pub precio_compra_referencial: f64,
+    pub precio_venta_referencial: f64,
+    pub es_vehiculo: i32,
+    pub stock_minimo: i32,
+    pub cilindraje: Option<i32>,
+    pub modelo: Option<String>,
+    pub categoria_nombre: Option<String>,
+    pub marca_nombre: Option<String>,
+    pub stock_actual: i64,
+}
+
+#[derive(Serialize)]
+pub struct PaginatedProductosResponse {
+    pub data: Vec<ProductoVistaDTO>,
+    pub total: i64,
+    pub pagina_actual: u32,
+    pub limite: u32,
+}
+
 // ==========================================
 // 2. LECTURA OPTIMIZADA CON PAGINACIÓN Y FILTROS
 // ==========================================
@@ -40,10 +70,20 @@ pub async fn obtener_productos_paginados(
     pagina: u32,
     limite: u32,
     pool: tauri::State<'_, SqlitePool>,
-) -> Result<Value, String> {
+) -> Result<PaginatedProductosResponse, String> {
     let offset = (pagina.saturating_sub(1)) * limite;
 
-    let mut query = QueryBuilder::<'_, Sqlite>::new(
+    // 🚀 TRANSACCIÓN ACID: Previene paginación fantasma (Excelente que lo hayas mantenido)
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    // --- 1. CONSTRUCTOR DEL COUNT ---
+    // 🚀 MEJORA: El COUNT no necesita hacer JOIN con marcas ni categorías.
+    // Como categoria_id y marca_id viven en la tabla productos, contar es rapidísimo.
+    let mut count_builder: QueryBuilder<'_, Sqlite> =
+        QueryBuilder::new("SELECT COUNT(p.id) FROM productos p WHERE 1=1");
+
+    // --- 2. CONSTRUCTOR DEL SELECT PRINCIPAL ---
+    let mut query_builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
         "SELECT p.*,
                 c.nombre as categoria_nombre,
                 m.nombre as marca_nombre,
@@ -55,94 +95,76 @@ pub async fn obtener_productos_paginados(
          WHERE 1=1",
     );
 
-    let mut count_query =
-        QueryBuilder::<'_, Sqlite>::new("SELECT COUNT(*) FROM productos p WHERE 1=1");
+    // --- 3. INYECCIÓN DINÁMICA DE FILTROS (Zero-Allocation + SARGable) ---
 
-    // ── Filtros dinámicos ────────────────────────────────────────────────────
-    if let Some(ref b) = buscar {
-        if !b.trim().is_empty() {
-            let like_term = format!("%{}%", b.trim().to_uppercase());
-
-            query.push(" AND (p.nombre LIKE ");
-            query.push_bind(like_term.clone());
-            query.push(" OR p.sku LIKE ");
-            query.push_bind(like_term.clone());
-            query.push(")");
-
-            count_query.push(" AND (p.nombre LIKE ");
-            count_query.push_bind(like_term.clone());
-            count_query.push(" OR p.sku LIKE ");
-            count_query.push_bind(like_term);
-            count_query.push(")");
-        }
-    }
-
-    if let Some(ref cat) = categoria_id {
+    // Filtro: Categoría
+    if let Some(cat) = &categoria_id {
         if !cat.trim().is_empty() {
-            query.push(" AND p.categoria_id = ");
-            query.push_bind(cat.clone());
-            count_query.push(" AND p.categoria_id = ");
-            count_query.push_bind(cat.clone());
+            count_builder.push(" AND p.categoria_id = ");
+            count_builder.push_bind(cat);
+
+            query_builder.push(" AND p.categoria_id = ");
+            query_builder.push_bind(cat);
         }
     }
 
-    if let Some(ref mar) = marca_id {
+    // Filtro: Marca
+    if let Some(mar) = &marca_id {
         if !mar.trim().is_empty() {
-            query.push(" AND p.marca_id = ");
-            query.push_bind(mar.clone());
-            count_query.push(" AND p.marca_id = ");
-            count_query.push_bind(mar.clone());
+            count_builder.push(" AND p.marca_id = ");
+            count_builder.push_bind(mar);
+
+            query_builder.push(" AND p.marca_id = ");
+            query_builder.push_bind(mar);
         }
     }
 
-    // GROUP BY obligatorio por el SUM() — antes del ORDER BY y paginación
-    query.push(" GROUP BY p.id ORDER BY p.nombre ASC LIMIT ");
-    query.push_bind(limite);
-    query.push(" OFFSET ");
-    query.push_bind(offset);
+    // Filtro: Búsqueda (Texto)
+    if let Some(termino) = &buscar {
+        if !termino.trim().is_empty() {
+            // Delegamos la concatenación a SQLite para no gastar RAM en Rust
+            count_builder.push(" AND (LOWER(p.nombre) LIKE '%' || LOWER(");
+            count_builder.push_bind(termino);
+            count_builder.push(") || '%' OR LOWER(p.sku) LIKE '%' || LOWER(");
+            count_builder.push_bind(termino);
+            count_builder.push(") || '%')");
 
-    // ── Ejecución ────────────────────────────────────────────────────────────
-    let total_records: (i64,) = count_query
-        .build_query_as()
-        .fetch_one(&*pool)
+            query_builder.push(" AND (LOWER(p.nombre) LIKE '%' || LOWER(");
+            query_builder.push_bind(termino);
+            query_builder.push(") || '%' OR LOWER(p.sku) LIKE '%' || LOWER(");
+            query_builder.push_bind(termino);
+            query_builder.push(") || '%')");
+        }
+    }
+
+    // --- 4. EJECUTAR EL COUNT ---
+    let total_records: i64 = count_builder
+        .build_query_scalar()
+        .fetch_one(&mut *tx) // Usamos la transacción atómica
         .await
         .map_err(|e| format!("Error al contar productos: {}", e))?;
 
-    let rows = query
-        .build()
-        .fetch_all(&*pool)
+    // --- 5. FINALIZAR QUERY Y EJECUTAR SELECT ---
+    // IMPORTANTE: El GROUP BY va después de los WHERE y antes del ORDER/LIMIT
+    query_builder.push(" GROUP BY p.id ORDER BY p.nombre ASC LIMIT ");
+    query_builder.push_bind(limite);
+    query_builder.push(" OFFSET ");
+    query_builder.push_bind(offset);
+
+    let data = query_builder
+        .build_query_as::<ProductoVistaDTO>() // Mapeo automático directo al DTO
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| format!("Error al obtener datos de productos: {}", e))?;
 
-    // ── Mapeo a JSON ─────────────────────────────────────────────────────────
-    let productos: Vec<Value> = rows
-        .iter()
-        .map(|row| {
-            json!({
-                "id":                          row.try_get::<String, _>("id").unwrap_or_default(),
-                "categoria_id":                row.try_get::<Option<String>, _>("categoria_id").unwrap_or_default(),
-                "marca_id":                    row.try_get::<Option<String>, _>("marca_id").unwrap_or_default(),
-                "nombre":                      row.try_get::<String, _>("nombre").unwrap_or_default(),
-                "sku":                         row.try_get::<String, _>("sku").unwrap_or_default(),
-                "precio_compra_referencial":   row.try_get::<f64, _>("precio_compra_referencial").unwrap_or(0.0),
-                "precio_venta_referencial":    row.try_get::<f64, _>("precio_venta_referencial").unwrap_or(0.0),
-                "es_vehiculo":                 row.try_get::<i32, _>("es_vehiculo").unwrap_or(0),
-                "stock_minimo":                row.try_get::<i32, _>("stock_minimo").unwrap_or(0),
-                "cilindraje":                  row.try_get::<Option<i32>, _>("cilindraje").unwrap_or_default(),
-                "modelo":                      row.try_get::<Option<String>, _>("modelo").unwrap_or_default(),
-                "categoria_nombre":            row.try_get::<Option<String>, _>("categoria_nombre").unwrap_or_default(),
-                "marca_nombre":                row.try_get::<Option<String>, _>("marca_nombre").unwrap_or_default(),
-                "stock_actual":                row.try_get::<i64, _>("stock_actual").unwrap_or(0),
-            })
-        })
-        .collect();
+    tx.commit().await.map_err(|e| e.to_string())?;
 
-    Ok(json!({
-        "data":         productos,
-        "total":        total_records.0,
-        "pagina_actual": pagina,
-        "limite":       limite,
-    }))
+    Ok(PaginatedProductosResponse {
+        data,
+        total: total_records,
+        pagina_actual: pagina,
+        limite,
+    })
 }
 
 // ==========================================

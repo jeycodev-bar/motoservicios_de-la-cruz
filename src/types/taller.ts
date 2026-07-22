@@ -1,42 +1,3 @@
-// // types/taller.ts
-// export interface OrdenTaller {
-//     id: string;
-//     cliente_id: string;
-//     cliente_nombre: string;
-//     vehiculo_info: string;
-//     motivo_ingreso: string;
-//     estado: 'PENDIENTE' | 'EN_PROCESO' | 'LISTO' | 'ENTREGADO' | 'ARCHIVADO';
-//     fecha_ingreso: string;
-//     fecha_estimada?: string;
-//     fecha_entrega?: string; // ✨ Añadido al tipado
-//     costo_mano_obra?: number;
-//     creado_por?: string;
-//     mecanico_nombre?: string; // Para el historial
-// }
-
-// // ✨ DTO para la creación: Omitimos los campos que se autogeneran
-// export type CrearOrdenDTO = Omit<OrdenTaller, 'id' | 'cliente_nombre' | 'estado' | 'fecha_ingreso' | 'costo_mano_obra' | 'mecanico_nombre'>;
-
-// export interface RepuestoCatalogo {
-//     id?: string;
-//     lote_id: string;
-//     producto_nombre: string;
-//     cantidad: number; // Stock disponible
-//     precio_venta_referencial: number;
-// }
-
-// export interface DetalleOrden {
-//     id: string;
-//     orden_id: string;
-//     lote_id: string;
-//     producto_nombre: string;
-//     cantidad: number;
-//     precio_unitario: number;
-//     subtotal: number;
-// }
-
-
-
 /**
  * taller.ts — Tipos del módulo de taller.
  *
@@ -73,7 +34,7 @@ export interface OrdenActiva {
     /** Viene del JOIN con clientes en la query de Rust */
     cliente_nombre: string | null;
     cliente_telefono: string | null;
-    
+
     mecanico_nombre: string | null // ✨ NUEVO: Recibimos el nombre del JOIN en Rust
 }
 
@@ -99,6 +60,9 @@ export interface RepuestoCatalogo {
     cantidad: number;
     precio_venta_referencial: number;
     color?: string | null;
+    // ✅ NUEVOS — vienen del JOIN con categorias y marcas en taller.rs
+    categoria_nombre: string | null;
+    marca_nombre: string | null;
 }
 
 /**

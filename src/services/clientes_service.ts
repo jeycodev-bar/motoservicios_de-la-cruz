@@ -17,14 +17,6 @@ import type { Cliente, ClienteDTO } from '../types';
 export const ClientesService = {
 
     // Búsqueda exacta por número de documento — para el POS
-    // buscarClientePorDocumento: async (numeroDocumento: string): Promise<Cliente | null> => {
-    //     const db = await getDb();
-    //     const result = await db.select<Cliente[]>(
-    //         `SELECT * FROM clientes WHERE numero_documento = ? LIMIT 1`,
-    //         [numeroDocumento.trim()]
-    //     );
-    //     return result[0] ?? null;
-    // },
     // ✅ Delegado a Rust (CREO QUE ESTO NO SE USA EN NINGUNA VISTA)
     buscarClientePorDocumento: async (numeroDocumento: string): Promise<Cliente | null> => {
         try {
@@ -34,39 +26,6 @@ export const ClientesService = {
         }
     },
 
-    // obtenerClientesPaginados: async (
-    //     pagina: number = 1,
-    //     limite: number = 50,
-    //     terminoBusqueda: string = ''
-    // ): Promise<{ data: Cliente[]; total: number }> => {
-    //     const db = await getDb();
-    //     const offset = (pagina - 1) * limite;
-
-    //     // ✅ (string | number)[] en lugar de any[]
-    //     const queryParams: (string | number)[] = [];
-    //     let whereClause = '';
-
-    //     if (terminoBusqueda.trim()) {
-    //         whereClause = `WHERE nombre_completo LIKE ? OR numero_documento LIKE ?`;
-    //         const like = `%${terminoBusqueda.trim().toUpperCase()}%`;
-    //         queryParams.push(like, like);
-    //     }
-
-    //     const countResult = await db.select<{ total: number }[]>(
-    //         `SELECT COUNT(*) as total FROM clientes ${whereClause}`,
-    //         queryParams
-    //     );
-    //     const total = countResult[0].total;
-
-    //     const data = await db.select<Cliente[]>(`
-    //         SELECT * FROM clientes
-    //         ${whereClause}
-    //         ORDER BY fecha_registro DESC
-    //         LIMIT ? OFFSET ?
-    //     `, [...queryParams, limite, offset]);
-
-    //     return { data, total };
-    // },
     // ✅ Delegado a Rust
     obtenerClientesPaginados: async (
         pagina: number = 1,
@@ -85,27 +44,6 @@ export const ClientesService = {
     },
 
     // Autocompletado rápido para el módulo de ventas
-    // buscarClientesRapido: async (texto: string): Promise<Cliente[]> => {
-    //     const db = await getDb();
-    //     const termino = texto.trim();
-
-    //     if (!termino) {
-    //         return await db.select<Cliente[]>(
-    //             `SELECT * FROM clientes ORDER BY fecha_registro DESC LIMIT 5`
-    //         );
-    //     }
-
-    //     // Con 1 carácter no buscamos — evitamos saturar la BD
-    //     if (termino.length === 1) return [];
-
-    //     const like = `%${termino.toUpperCase()}%`;
-    //     return await db.select<Cliente[]>(`
-    //         SELECT * FROM clientes
-    //         WHERE numero_documento LIKE ? OR nombre_completo LIKE ?
-    //         ORDER BY nombre_completo ASC
-    //         LIMIT 10
-    //     `, [like, like]);
-    // },
     // ✅ Delegado a Rust
     buscarClientesRapido: async (texto: string): Promise<Cliente[]> => {
         try {

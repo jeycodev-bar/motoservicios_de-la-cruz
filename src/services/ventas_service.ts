@@ -1,4 +1,4 @@
-// src/services/ventas.ts
+// src/services/ventas_services.ts
 /**
  * services/ventas.ts
  *

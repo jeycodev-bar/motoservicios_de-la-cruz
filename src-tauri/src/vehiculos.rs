@@ -1,3 +1,5 @@
+//src-tauri/src/vehiculos.rs
+
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, QueryBuilder, Row, Sqlite, SqlitePool};
 use uuid::Uuid;

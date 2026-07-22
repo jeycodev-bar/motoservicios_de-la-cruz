@@ -9,7 +9,6 @@
  * - Imports actualizados a @/types
  */
 
-// import { getDb } from './db';
 import { invoke } from '@tauri-apps/api/core';
 import { normalizeError } from '../utils/errors';
 import type { ProductoDTO, ProductoVista, PaginacionResult } from '../types';

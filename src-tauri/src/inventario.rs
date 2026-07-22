@@ -1,3 +1,5 @@
+//src-tauri/src/inveantario.rs
+
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -29,6 +31,51 @@ pub struct PaginatedBodega {
     pub total: i64,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct VarianteBodega {
+    pub lote_id: String,
+    pub color: Option<String>,
+    pub cantidad: i64,
+    pub ubicacion: String,
+    pub ultimo_ingreso: i64,
+    pub stock_anterior: i64,
+    pub fecha_ultima_modificacion: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ProductoBodega {
+    pub producto_id: String,
+    pub producto_nombre: String,
+    pub sku: String,
+    pub es_vehiculo: i64,
+    pub stock_total: i64,
+    pub stock_minimo: i64,
+    pub stock_critico: bool,
+    pub categoria_nombre: Option<String>,
+    pub marca_nombre: Option<String>,
+    pub variantes: Vec<VarianteBodega>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ProductoBodegaRow {
+    producto_id: String,
+    producto_nombre: String,
+    sku: String,
+    es_vehiculo: i64,
+    stock_total: i64,
+    stock_minimo: i64,
+    stock_critico: i64,
+    categoria_nombre: Option<String>,
+    marca_nombre: Option<String>,
+    variantes_raw: String,
+}
+
+#[derive(Serialize)]
+pub struct PaginatedProductosBodega {
+    pub items: Vec<ProductoBodega>,
+    pub total: i64,
+}
+
 #[derive(Serialize, Deserialize, sqlx::FromRow)]
 pub struct InventarioRecienteVista {
     pub id: String,
@@ -52,7 +99,18 @@ pub struct PaginatedInventarioResponse {
 }
 
 // ==========================================
-// 2. COMANDO: REGISTRAR INGRESO
+// 2. HELPER: crear índices al iniciar
+// ==========================================
+// Llama a esta función desde tu setup de pool (ej: main.rs o setup.rs)
+// para garantizar que los índices existan antes de recibir peticiones.
+
+// pub async fn crear_indices_rendimiento(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+//     // ...
+//     Ok(())
+// }
+
+// ==========================================
+// 3. COMANDO: REGISTRAR INGRESO
 // ==========================================
 
 #[tauri::command]
@@ -75,7 +133,6 @@ pub async fn registrar_ingreso_seguro(
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    // 1. PRE-CHECK: ¿Ya existe el lote con este color?
     let lote_id_existente: Option<String> = if let Some(ref c) = color_limpio {
         sqlx::query_scalar(
             "SELECT id FROM inventario_lotes WHERE producto_id = ? AND color = ? LIMIT 1",
@@ -95,7 +152,6 @@ pub async fn registrar_ingreso_seguro(
         .map_err(|e| e.to_string())?
     };
 
-    // 2. ACTUALIZACIÓN O INSERCIÓN (Upsert)
     let lote_id = if let Some(id) = lote_id_existente {
         sqlx::query(
             "UPDATE inventario_lotes SET cantidad = cantidad + ?, ubicacion = ? WHERE id = ?",
@@ -124,7 +180,6 @@ pub async fn registrar_ingreso_seguro(
         new_id
     };
 
-    // 3. REGISTRO EN KARDEX
     let kardex_id = Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO kardex (id, lote_id, tipo_movimiento, cantidad, motivo, usuario)
@@ -144,7 +199,7 @@ pub async fn registrar_ingreso_seguro(
 }
 
 // ==========================================
-// 3. COMANDO: RECARGAR STOCK EN LOTE EXISTENTE
+// 4. COMANDO: RECARGAR STOCK EN LOTE EXISTENTE
 // ==========================================
 
 #[tauri::command]
@@ -153,6 +208,7 @@ pub async fn agregar_stock_existente_seguro(
     cantidad: i32,
     usuario_id: String,
     motivo: String,
+    tipo_movimiento: Option<String>,
     pool: tauri::State<'_, SqlitePool>,
 ) -> Result<(), String> {
     if cantidad <= 0 {
@@ -160,6 +216,17 @@ pub async fn agregar_stock_existente_seguro(
     }
 
     let motivo_limpio = motivo.trim().to_uppercase();
+    let tipo = tipo_movimiento
+        .as_deref()
+        .unwrap_or("ENTRADA")
+        .trim()
+        .to_uppercase();
+
+    let tipo_valido = matches!(tipo.as_str(), "ENTRADA" | "DEVOLUCION_TALLER");
+    if !tipo_valido {
+        return Err(format!("Tipo de movimiento inválido: {}", tipo));
+    }
+
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     let result = sqlx::query("UPDATE inventario_lotes SET cantidad = cantidad + ? WHERE id = ?")
@@ -178,10 +245,11 @@ pub async fn agregar_stock_existente_seguro(
     let kardex_id = Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO kardex (id, lote_id, tipo_movimiento, cantidad, motivo, usuario)
-         VALUES (?, ?, 'ENTRADA', ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&kardex_id)
     .bind(&lote_id)
+    .bind(&tipo)
     .bind(cantidad)
     .bind(&motivo_limpio)
     .bind(&usuario_id)
@@ -194,7 +262,7 @@ pub async fn agregar_stock_existente_seguro(
 }
 
 // ==========================================
-// 4. COMANDO: INVENTARIO RECIENTE (sin cambios — CTE con ROW_NUMBER correcto)
+// 5. COMANDO: INVENTARIO RECIENTE
 // ==========================================
 
 #[tauri::command]
@@ -212,7 +280,6 @@ pub async fn obtener_inventario_reciente(
 
     let total_paginas = ((total_registros as f64 / limite as f64).ceil() as i64).max(1);
 
-    // CTE con ROW_NUMBER — patrón correcto y eficiente, se mantiene intacto
     let query = "
         WITH StockTotal AS (
             SELECT producto_id, SUM(cantidad) as stock_actual
@@ -220,30 +287,35 @@ pub async fn obtener_inventario_reciente(
             GROUP BY producto_id
         ),
         UltimoKardex AS (
-            SELECT 
+            SELECT
                 il.producto_id,
-                k.cantidad as ultimo_ingreso,
-                k.fecha as fecha_movimiento,
-                ROW_NUMBER() OVER (PARTITION BY il.producto_id ORDER BY k.fecha DESC) as rn
+                k.cantidad   AS ultimo_ingreso,
+                k.fecha      AS fecha_movimiento,
+                ROW_NUMBER() OVER (
+                    PARTITION BY il.producto_id
+                    ORDER BY k.fecha DESC
+                ) AS rn
             FROM kardex k
             JOIN inventario_lotes il ON k.lote_id = il.id
+            WHERE k.tipo_movimiento IN ('ENTRADA', 'DEVOLUCION_TALLER')
         )
-        SELECT 
+        SELECT
             p.id,
             p.nombre,
             p.sku,
             p.es_vehiculo,
-            c.nombre AS categoria_nombre,
-            m.nombre AS marca_nombre,
-            COALESCE(s.stock_actual, 0) AS stock_actual,
-            COALESCE(uk.ultimo_ingreso, 0) AS ultimo_ingreso,
-            (COALESCE(s.stock_actual, 0) - COALESCE(uk.ultimo_ingreso, 0)) AS stock_anterior,
-            COALESCE(uk.fecha_movimiento, p.fecha_registro) AS fecha_ultima_modificacion
+            c.nombre  AS categoria_nombre,
+            m.nombre  AS marca_nombre,
+            COALESCE(s.stock_actual, 0)                                          AS stock_actual,
+            COALESCE(uk.ultimo_ingreso, 0)                                       AS ultimo_ingreso,
+            -- ✅ FRAGMENTO A: MAX(0, ...)
+            MAX(0, COALESCE(s.stock_actual, 0) - COALESCE(uk.ultimo_ingreso, 0)) AS stock_anterior,
+            COALESCE(uk.fecha_movimiento, p.fecha_registro)                      AS fecha_ultima_modificacion
         FROM productos p
-        LEFT JOIN categorias c ON p.categoria_id = c.id
-        LEFT JOIN marcas m ON p.marca_id = m.id
-        LEFT JOIN StockTotal s ON p.id = s.producto_id
-        LEFT JOIN UltimoKardex uk ON p.id = uk.producto_id AND uk.rn = 1
+        LEFT JOIN categorias c      ON p.categoria_id = c.id
+        LEFT JOIN marcas m          ON p.marca_id     = m.id
+        LEFT JOIN StockTotal s      ON p.id           = s.producto_id
+        LEFT JOIN UltimoKardex uk   ON p.id           = uk.producto_id AND uk.rn = 1
         ORDER BY fecha_ultima_modificacion DESC
         LIMIT ? OFFSET ?
     ";
@@ -264,9 +336,7 @@ pub async fn obtener_inventario_reciente(
 }
 
 // ==========================================
-// 5. COMANDO: STOCK DE BODEGA
-//    ✅ FIX 1 — Transacción que cubre COUNT + SELECT (elimina race condition en WAL)
-//    ✅ FIX 2 — stock_anterior movido al CTE (elimina N subconsultas correlacionadas)
+// 6. COMANDO: STOCK DE BODEGA POR LOTE
 // ==========================================
 
 #[tauri::command]
@@ -279,14 +349,9 @@ pub async fn obtener_stock_bodega(
     pool: tauri::State<'_, SqlitePool>,
 ) -> Result<PaginatedBodega, String> {
     let offset = (pagina - 1) * limite;
-    let search_term = format!("%{}%", buscar.unwrap_or_default().to_lowercase());
+    let search_term = buscar.unwrap_or_default();
     let cat_id = categoria_id.unwrap_or_default();
     let mar_id = marca_id.unwrap_or_default();
-
-    // ✅ FIX 1: Abrimos transacción de LECTURA para que COUNT y SELECT
-    //    sean atómicos entre sí. En WAL mode, esto garantiza que ambas
-    //    queries ven el mismo snapshot — nunca habrá "Página 3 de 5" con 4 filas.
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     let count_query = "
         SELECT COUNT(*)
@@ -297,10 +362,10 @@ pub async fn obtener_stock_bodega(
         AND (? = '' OR p.categoria_id = ?)
         AND (? = '' OR p.marca_id = ?)
         AND (
-            LOWER(p.nombre) LIKE ? OR
-            LOWER(p.sku) LIKE ? OR
-            LOWER(IFNULL(il.color, '')) LIKE ? OR
-            LOWER(IFNULL(c.nombre, '')) LIKE ?
+            LOWER(p.nombre) LIKE '%' || LOWER(?) || '%' OR
+            LOWER(p.sku)    LIKE '%' || LOWER(?) || '%' OR
+            LOWER(IFNULL(il.color, '')) LIKE '%' || LOWER(?) || '%' OR
+            LOWER(IFNULL(c.nombre, '')) LIKE '%' || LOWER(?) || '%'
         )
     ";
 
@@ -313,70 +378,61 @@ pub async fn obtener_stock_bodega(
         .bind(&search_term)
         .bind(&search_term)
         .bind(&search_term)
-        .fetch_one(&mut *tx) // ← usa la transacción
+        .fetch_one(&*pool)
         .await
         .unwrap_or(0);
 
-    // ✅ FIX 2: stock_anterior calculado en el CTE StockAnterior (1 query total)
-    //    en lugar de la subconsulta correlacionada que ejecutaba 1 query por fila.
-    //    Con 100 lotes: antes = 100 queries al kardex. Ahora = 1 query total.
     let data_query = "
-        WITH UltimaEntrada AS (
-            -- Último movimiento ENTRADA por lote (para obtener ultimo_ingreso y su fecha)
+        WITH FiltroBase AS (
             SELECT
-                lote_id,
-                cantidad AS ultimo_ingreso,
-                fecha    AS fecha_ultima_modificacion,
-                ROW_NUMBER() OVER (PARTITION BY lote_id ORDER BY fecha DESC) AS rn
-            FROM kardex
-            WHERE tipo_movimiento = 'ENTRADA'
+                il.id AS lote_id, il.color, il.cantidad, il.ubicacion,
+                p.nombre AS producto_nombre, p.sku, p.es_vehiculo,
+                COALESCE(p.stock_minimo, 2) AS stock_minimo,
+                c.nombre AS categoria_nombre, m.nombre AS marca_nombre
+            FROM inventario_lotes il
+            JOIN productos p ON il.producto_id = p.id
+            LEFT JOIN categorias c ON p.categoria_id = c.id
+            LEFT JOIN marcas m ON p.marca_id = m.id
+            WHERE il.cantidad > 0
+            AND (? = '' OR p.categoria_id = ?)
+            AND (? = '' OR p.marca_id = ?)
+            AND (
+                LOWER(p.nombre) LIKE '%' || LOWER(?) || '%' OR
+                LOWER(p.sku)    LIKE '%' || LOWER(?) || '%' OR
+                LOWER(IFNULL(il.color, '')) LIKE '%' || LOWER(?) || '%' OR
+                LOWER(IFNULL(c.nombre, '')) LIKE '%' || LOWER(?) || '%'
+            )
         ),
-        StockAnterior AS (
-            -- ✅ Stock acumulado ANTES de la última entrada — calculado una sola vez
-            -- para todos los lotes relevantes, no con una subconsulta por fila.
+        -- ✅ FRAGMENTO B: JOIN directo en lugar de IN()
+        UltimaEntrada AS (
+            SELECT k.lote_id, k.cantidad AS ultimo_ingreso, k.fecha AS fecha_ultima_modificacion
+            FROM (
+                SELECT
+                    k2.lote_id,
+                    k2.cantidad,
+                    k2.fecha,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY k2.lote_id
+                        ORDER BY k2.fecha DESC
+                    ) AS rn
+                FROM kardex k2
+                JOIN FiltroBase fb ON k2.lote_id = fb.lote_id
+                WHERE k2.tipo_movimiento = 'ENTRADA'
+            ) k WHERE rn = 1
+        ),
+        ResultadoFinal AS (
             SELECT
-                k.lote_id,
-                SUM(
-                    CASE WHEN k.tipo_movimiento = 'ENTRADA'
-                         THEN  k.cantidad
-                         ELSE -k.cantidad
-                    END
-                ) AS stock_anterior
-            FROM kardex k
-            JOIN UltimaEntrada ue ON k.lote_id = ue.lote_id AND ue.rn = 1
-            WHERE k.fecha < ue.fecha_ultima_modificacion
-            GROUP BY k.lote_id
+                fb.*,
+                COALESCE(ue.ultimo_ingreso, 0)                       AS ultimo_ingreso,
+                -- ✅ FRAGMENTO A: MAX(0, ...)
+                MAX(0, fb.cantidad - COALESCE(ue.ultimo_ingreso, 0)) AS stock_anterior,
+                ue.fecha_ultima_modificacion
+            FROM FiltroBase fb
+            LEFT JOIN UltimaEntrada ue ON fb.lote_id = ue.lote_id
         )
-        SELECT
-            il.id               AS lote_id,
-            il.color,
-            il.cantidad,
-            il.ubicacion,
-            p.nombre            AS producto_nombre,
-            p.sku,
-            p.es_vehiculo,
-            COALESCE(p.stock_minimo, 2) AS stock_minimo,
-            c.nombre            AS categoria_nombre,
-            m.nombre            AS marca_nombre,
-            COALESCE(ue.ultimo_ingreso, 0)   AS ultimo_ingreso,
-            COALESCE(sa.stock_anterior, 0)   AS stock_anterior,
-            ue.fecha_ultima_modificacion
-        FROM inventario_lotes il
-        JOIN productos p ON il.producto_id = p.id
-        LEFT JOIN categorias c ON p.categoria_id = c.id
-        LEFT JOIN marcas m ON p.marca_id = m.id
-        LEFT JOIN UltimaEntrada ue ON il.id = ue.lote_id AND ue.rn = 1
-        LEFT JOIN StockAnterior sa ON il.id = sa.lote_id   -- ← JOIN al CTE, no subconsulta
-        WHERE il.cantidad > 0
-        AND (? = '' OR p.categoria_id = ?)
-        AND (? = '' OR p.marca_id = ?)
-        AND (
-            LOWER(p.nombre) LIKE ? OR
-            LOWER(p.sku) LIKE ? OR
-            LOWER(IFNULL(il.color, '')) LIKE ? OR
-            LOWER(IFNULL(c.nombre, '')) LIKE ?
-        )
-        ORDER BY ue.fecha_ultima_modificacion DESC NULLS LAST, p.nombre ASC
+        SELECT *
+        FROM ResultadoFinal
+        ORDER BY fecha_ultima_modificacion DESC NULLS LAST, producto_nombre ASC
         LIMIT ? OFFSET ?
     ";
 
@@ -391,12 +447,161 @@ pub async fn obtener_stock_bodega(
         .bind(&search_term)
         .bind(limite as i64)
         .bind(offset as i64)
-        .fetch_all(&mut *tx) // ← usa la misma transacción que el COUNT
+        .fetch_all(&*pool)
         .await
-        .map_err(|e| format!("Error al obtener stock de bodega: {}", e))?;
-
-    // Transacción de solo lectura — el commit libera el snapshot
-    tx.commit().await.map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Error al obtener stock: {}", e))?;
 
     Ok(PaginatedBodega { items, total })
+}
+
+// ==========================================
+// 7. COMANDO: STOCK AGRUPADO POR PRODUCTO
+// ==========================================
+
+#[tauri::command]
+pub async fn obtener_stock_bodega_agrupado(
+    buscar: Option<String>,
+    categoria_id: Option<String>,
+    marca_id: Option<String>,
+    pagina: u32,
+    limite: u32,
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<PaginatedProductosBodega, String> {
+    let offset = (pagina - 1) * limite;
+    let search_term = buscar.unwrap_or_default();
+    let cat_id = categoria_id.unwrap_or_default();
+    let mar_id = marca_id.unwrap_or_default();
+
+    let count_query = "
+        SELECT COUNT(DISTINCT p.id)
+        FROM inventario_lotes il
+        JOIN productos p ON il.producto_id = p.id
+        LEFT JOIN categorias c ON p.categoria_id = c.id
+        WHERE il.cantidad > 0
+        AND (? = '' OR p.categoria_id = ?)
+        AND (? = '' OR p.marca_id = ?)
+        AND (
+            LOWER(p.nombre) LIKE '%' || LOWER(?) || '%' OR
+            LOWER(p.sku)    LIKE '%' || LOWER(?) || '%' OR
+            LOWER(IFNULL(c.nombre, '')) LIKE '%' || LOWER(?) || '%'
+        )
+    ";
+
+    let total: i64 = sqlx::query_scalar(count_query)
+        .bind(&cat_id)
+        .bind(&cat_id)
+        .bind(&mar_id)
+        .bind(&mar_id)
+        .bind(&search_term)
+        .bind(&search_term)
+        .bind(&search_term)
+        .fetch_one(&*pool)
+        .await
+        .unwrap_or(0);
+
+    let data_query = "
+        WITH ProductosFiltrados AS (
+            SELECT DISTINCT p.id AS producto_id
+            FROM productos p
+            JOIN inventario_lotes il ON p.id = il.producto_id
+            LEFT JOIN categorias c ON p.categoria_id = c.id
+            WHERE il.cantidad > 0
+            AND (? = '' OR p.categoria_id = ?)
+            AND (? = '' OR p.marca_id = ?)
+            AND (
+                LOWER(p.nombre) LIKE '%' || LOWER(?) || '%' OR
+                LOWER(p.sku)    LIKE '%' || LOWER(?) || '%' OR
+                LOWER(IFNULL(c.nombre, '')) LIKE '%' || LOWER(?) || '%'
+            )
+            ORDER BY p.nombre ASC
+            LIMIT ? OFFSET ?
+        ),
+        LotesFiltrados AS (
+            SELECT il.id AS lote_id, il.producto_id
+            FROM inventario_lotes il
+            JOIN ProductosFiltrados pf ON il.producto_id = pf.producto_id
+            WHERE il.cantidad > 0
+        ),
+        UltimaEntrada AS (
+            SELECT
+                k.lote_id,
+                k.cantidad AS ultimo_ingreso,
+                k.fecha    AS fecha_ultima_modificacion
+            FROM (
+                SELECT
+                    k2.lote_id,
+                    k2.cantidad,
+                    k2.fecha,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY k2.lote_id
+                        ORDER BY k2.fecha DESC
+                    ) AS rn
+                FROM kardex k2
+                WHERE k2.tipo_movimiento = 'ENTRADA'
+                  AND k2.lote_id IN (SELECT lote_id FROM LotesFiltrados)
+            ) k WHERE rn = 1
+        )
+        SELECT
+            p.id                        AS producto_id,
+            p.nombre                    AS producto_nombre,
+            p.sku,
+            p.es_vehiculo,
+            SUM(il.cantidad)            AS stock_total,
+            COALESCE(p.stock_minimo, 2) AS stock_minimo,
+            CASE WHEN MIN(il.cantidad) <= COALESCE(p.stock_minimo, 2)
+                 THEN 1 ELSE 0 END      AS stock_critico,
+            c.nombre                    AS categoria_nombre,
+            m.nombre                    AS marca_nombre,
+            json_group_array(json_object(
+                'lote_id',                    il.id,
+                'color',                      il.color,
+                'cantidad',                   il.cantidad,
+                'ubicacion',                  il.ubicacion,
+                'ultimo_ingreso',             COALESCE(ue.ultimo_ingreso, 0),
+                -- ✅ FRAGMENTO A: MAX(0, ...)
+                'stock_anterior',             MAX(0, il.cantidad - COALESCE(ue.ultimo_ingreso, 0)),
+                'fecha_ultima_modificacion',  ue.fecha_ultima_modificacion
+            )) AS variantes_raw
+        FROM ProductosFiltrados pf
+        JOIN productos p            ON p.id = pf.producto_id
+        JOIN inventario_lotes il    ON il.producto_id = p.id AND il.cantidad > 0
+        LEFT JOIN categorias c      ON p.categoria_id = c.id
+        LEFT JOIN marcas m          ON p.marca_id = m.id
+        LEFT JOIN UltimaEntrada ue  ON il.id = ue.lote_id
+        GROUP BY p.id
+        ORDER BY MAX(ue.fecha_ultima_modificacion) DESC NULLS LAST, p.nombre ASC
+    ";
+
+    let rows = sqlx::query_as::<_, ProductoBodegaRow>(data_query)
+        .bind(&cat_id)
+        .bind(&cat_id)
+        .bind(&mar_id)
+        .bind(&mar_id)
+        .bind(&search_term)
+        .bind(&search_term)
+        .bind(&search_term)
+        .bind(limite as i64)
+        .bind(offset as i64)
+        .fetch_all(&*pool)
+        .await
+        .map_err(|e| format!("Error al obtener stock agrupado: {}", e))?;
+
+    let items = rows
+        .into_iter()
+        .map(|row| ProductoBodega {
+            producto_id: row.producto_id,
+            producto_nombre: row.producto_nombre,
+            sku: row.sku,
+            es_vehiculo: row.es_vehiculo,
+            stock_total: row.stock_total,
+            stock_minimo: row.stock_minimo,
+            stock_critico: row.stock_critico != 0,
+            categoria_nombre: row.categoria_nombre,
+            marca_nombre: row.marca_nombre,
+            variantes: serde_json::from_str::<Vec<VarianteBodega>>(&row.variantes_raw)
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    Ok(PaginatedProductosBodega { items, total })
 }

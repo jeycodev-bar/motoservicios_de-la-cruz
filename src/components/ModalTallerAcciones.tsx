@@ -1,4 +1,4 @@
-// /src/components/ModalTallerAcciones.tsx    (aquí nos quedamos)
+// src/components/ModalTallerAcciones.tsx
 import { FormEvent, Dispatch, SetStateAction } from 'react';
 import { Loader2, AlertCircle } from 'lucide-react';
 import type { RepuestoCatalogo, DetalleOrden } from '../types';

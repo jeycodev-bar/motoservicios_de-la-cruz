@@ -42,8 +42,25 @@ export type {
     RespuestaPaginadaVentas,
     ProductoCatalogo,
     CarritoItemPayload,
+
     BodegaItemVista,
     PaginatedBodega,
+    // ============================================================
+    // FRAGMENTO 2 — src/types/index.ts
+    // Reemplazar el bloque de exports de INVENTARIO / BODEGA:
+    //
+    //   export type {
+    //       BodegaItemVista,
+    //       PaginatedBodega,
+    //   } from './api';
+    //
+    // por este (añade los 3 tipos nuevos):
+    // ============================================================
+    VarianteBodega,
+    ProductoBodega,
+    PaginatedProductosBodega,
+
+
     KardexMovimiento,
     VehiculoFisicoDetalle,
     RespuestaPaginadaVehiculos,
